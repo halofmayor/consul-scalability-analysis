@@ -18,10 +18,11 @@ set -euo pipefail
 #   - bash
 #   - python3
 #   - python3-numpy
+#   - python3-scipy
 #   - gnuplot
 # =============================================================================
 
-export LC_ALL=C
+export LC_ALL=C.UTF-8
 
 READ_FILE="${1:-read_stress_results.dat}"
 WRITE_FILE="${2:-write_stress_results.dat}"
@@ -70,8 +71,9 @@ echo
 # Python:
 #   - lê os .dat
 #   - encontra X(1) = gamma
-#   - estima sigma e kappa
+#   - estima sigma e kappa (regressão não-negativa)
 #   - calcula R²
+#   - avalia confiabilidade do ajuste
 #   - cria ficheiro de parâmetros para o gnuplot
 #   - cria relatório textual
 # =============================================================================
@@ -89,6 +91,13 @@ try:
 except ImportError:
     print("ERRO: numpy não está instalado.", file=sys.stderr)
     print("Instale-o com: python3 -m pip install numpy", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from scipy.optimize import nnls
+except ImportError:
+    print("ERRO: scipy não está instalado.", file=sys.stderr)
+    print("Instale-o com: pip3 install scipy", file=sys.stderr)
     sys.exit(1)
 
 read_file = Path(sys.argv[1])
@@ -183,6 +192,11 @@ def load_data(path):
 #
 # x1 = N - 1
 # x2 = N*(N-1)
+#
+# A regressão usa NNLS (non-negative least squares) em vez de mínimos
+# quadrados irrestritos, porque sigma e kappa não podem ser negativos
+# no modelo da USL — um resultado negativo indicaria um ajuste inválido,
+# não um comportamento real do sistema.
 # =============================================================================
 
 def fit_usl(rows):
@@ -227,9 +241,7 @@ def fit_usl(rows):
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
 
-    coefficients, residuals, rank, singular_values = np.linalg.lstsq(
-        A, b, rcond=None
-    )
+    coefficients, residual_norm = nnls(A, b)
 
     sigma = float(coefficients[0])
     kappa = float(coefficients[1])
@@ -299,6 +311,22 @@ def fit_usl(rows):
         r2_transformed = float("nan")
 
     # -------------------------------------------------------------------------
+    # Checagem de confiabilidade do ajuste
+    # -------------------------------------------------------------------------
+
+    warnings = []
+
+    reliability_gap = abs(r2_throughput - r2_transformed)
+    is_reliable = r2_throughput >= 0.8 and reliability_gap <= 0.20
+
+    if not is_reliable:
+        warnings.append(
+            f"AVISO: ajuste pouco confiavel (R2_throughput={r2_throughput:.4f}, "
+            f"R2_transformed={r2_transformed:.4f}). N_peak e X_peak sao extrapolacoes "
+            f"e nao devem ser reportados como previsao valida."
+        )
+
+    # -------------------------------------------------------------------------
     # Peak da curva USL
     #
     # Não é necessário para o cálculo dos fatores, mas é útil para análise.
@@ -328,6 +356,22 @@ def fit_usl(rows):
     n_peak_estimate = float(grid[peak_index])
     x_peak_estimate = float(values[peak_index])
 
+    # Se o "pico" encontrado está na borda da janela de busca, não é um pico
+    # de verdade — significa que a curva ainda estava subindo quando a busca
+    # parou (comum quando kappa sai muito pequeno ou exatamente 0 via NNLS).
+    if peak_index >= len(grid) - 2:
+        warnings.append(
+            f"AVISO: nenhum pico real encontrado ate N={search_max:.0f} "
+            f"(kappa={kappa:.6g}). O sistema, dentro da faixa testada, ainda "
+            f"nao mostra comportamento retrogrado — N_peak/X_peak reportados "
+            f"sao apenas o limite da janela de busca, nao uma previsao."
+        )
+
+    for w in warnings:
+        print(w, file=sys.stderr)
+
+    reliability_warning = " | ".join(warnings) if warnings else None
+
     return {
         "gamma": gamma,
         "sigma": sigma,
@@ -337,7 +381,7 @@ def fit_usl(rows):
         "n_peak": n_peak_estimate,
         "x_peak": x_peak_estimate,
         "rows": rows,
-        "rank": rank,
+        "reliability_warning": reliability_warning,
     }
 
 
@@ -421,6 +465,12 @@ def write_result_block(name, result, f):
     f.write(f"R² (N/X)        = {result['r2_transformed']:.8f}\n")
     f.write(f"Estimated peak N = {result['n_peak']:.4f}\n")
     f.write(f"Estimated peak X = {result['x_peak']:.4f} req/s\n")
+
+    if result["reliability_warning"]:
+        f.write("\n")
+        for w in result["reliability_warning"].split(" | "):
+            f.write(f"{w}\n")
+
     f.write("\n")
 
 

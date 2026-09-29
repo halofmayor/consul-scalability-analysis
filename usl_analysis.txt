@@ -1,0 +1,30 @@
+Universal Scalability Law Analysis
+========================================================================
+
+Model:
+X(N) = gamma*N / [1 + sigma*(N-1) + kappa*N*(N-1)]
+
+Parameter identification:
+gamma = X(1)
+gamma*N/X(N) - 1 = sigma*(N-1) + kappa*N*(N-1)
+
+READ WORKLOAD
+------------------------------------------------------------------------
+gamma  = 2620.00000000 req/s
+sigma  = 0.92276143
+kappa  = -0.01673508
+R² (throughput) = 0.42668863
+R² (N/X)        = 0.99700500
+Estimated peak N = 56.1503
+Estimated peak X = 2197901.2760 req/s
+
+WRITE WORKLOAD
+------------------------------------------------------------------------
+gamma  = 822.90000000 req/s
+sigma  = 0.35459221
+kappa  = -0.02788555
+R² (throughput) = 0.99869681
+R² (N/X)        = 0.99169291
+Estimated peak N = 15.1872
+Estimated peak X = 559569.5176 req/s
+

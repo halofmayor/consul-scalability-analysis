@@ -7,29 +7,67 @@ set -euo pipefail
 # Uso:
 #   ./stress_writes.sh
 #   ./stress_writes.sh 30s
-#   ./stress_writes.sh 30s "1 2 4 8 16 32 64 128 200 240"
+#   ./stress_writes.sh 30s "1 3 5 7"
+#   ./stress_writes.sh 30s "1 3 5 7" 32
 #
+# Parâmetros:
+#   $1 = duração de cada teste
+#   $2 = tamanhos do cluster Consul
+#   $3 = número fixo de VUs do k6
+#
+# IMPORTANTE:
+#   N representa agora o número de servidores Consul,
+#   e NÃO o número de clientes concorrentes.
 # =============================================================================
 
 DURATION="${1:-10s}"
-CONCURRENCY_LEVELS="${2:-1 2 4 8 16 32 64 128 200 240}"
+CLUSTER_SIZES="${2:-1 3 5 7}"
+CLIENT_VUS="${3:-32}"
 
 NETWORK_NAME="consul-net"
-SERVER_NAME="consul-server"
-OUTPUT_FILE="write_stress_results.dat"
+SERVER_PREFIX="consul-server"
+OUTPUT_FILE="write_stress_results.csv"
 
 echo "=========================================================================================="
-echo "Experimento 2: Write Scalability"
+echo "Experimento: Write Scalability / Consenso Raft"
 echo "=========================================================================================="
 echo "Duração por teste: $DURATION"
-echo "Níveis de concorrência: $CONCURRENCY_LEVELS"
+echo "Tamanhos do cluster: $CLUSTER_SIZES"
+echo "VUs do k6: $CLIENT_VUS"
 echo
+
+# =============================================================================
+# Função de limpeza
+# =============================================================================
+
+cleanup() {
+
+    echo
+    echo "A limpar containers Consul..."
+
+    for N in $CLUSTER_SIZES; do
+        docker rm -f "${SERVER_PREFIX}-${N}" 2>/dev/null || true
+    done
+
+    # Remove qualquer container com o prefixo consul-server-
+    docker ps -a --format '{{.Names}}' |
+        grep "^${SERVER_PREFIX}-" |
+        xargs -r docker rm -f 2>/dev/null || true
+
+    docker network rm "$NETWORK_NAME" 2>/dev/null || true
+}
+
+# Garantir limpeza caso o script seja interrompido
+trap cleanup EXIT
 
 # =============================================================================
 # Limpeza prévia
 # =============================================================================
 
-docker rm -f "$SERVER_NAME" 2>/dev/null || true
+docker ps -a --format '{{.Names}}' |
+    grep "^${SERVER_PREFIX}" |
+    xargs -r docker rm -f 2>/dev/null || true
+
 docker network rm "$NETWORK_NAME" 2>/dev/null || true
 
 # =============================================================================
@@ -39,89 +77,159 @@ docker network rm "$NETWORK_NAME" 2>/dev/null || true
 docker network create "$NETWORK_NAME"
 
 # =============================================================================
-# Iniciar Consul
+# Executar cada tamanho de cluster
 # =============================================================================
 
-docker run -d \
-  --name "$SERVER_NAME" \
-  --net "$NETWORK_NAME" \
-  --cpus="1.0" \
-  --memory="512m" \
-  -p 8500:8500 \
-  hashicorp/consul:latest \
-  agent \
-  -server \
-  -bootstrap-expect=1 \
-  -ui \
-  -client=0.0.0.0
-
-# =============================================================================
-# Aguardar Consul ficar pronto
-# =============================================================================
-
-echo "A aguardar inicialização do Consul..."
-
-until curl -s http://localhost:8500/v1/status/leader | grep -q ':[0-9]'; do
-    sleep 1
-done
-
-echo "Consul pronto!"
-echo
-
-# =============================================================================
-# Cabeçalho do ficheiro
-# Mantido exatamente igual ao experimento de reads.
-# =============================================================================
-
-printf "%-6s %-16s %-14s %-14s %-14s %-14s %-14s\n" \
-  "# N" \
-  "Throughput(req/s)" \
-  "Avg_Lat" \
-  "Med_Lat" \
-  "P90_Lat" \
-  "P95_Lat" \
-  "Max_Lat" \
-  > "$OUTPUT_FILE"
-
-# =============================================================================
-# Função para extrair uma métrica do output do k6
-# =============================================================================
-
-extract_metric() {
-    local metric="$1"
-    local line="$2"
-
-    echo "$line" |
-        sed -n "s/.*${metric}=\\([^[:space:]]*\\).*/\\1/p"
-}
-
-# =============================================================================
-# Executar cada nível de concorrência
-# =============================================================================
-
-for N in $CONCURRENCY_LEVELS; do
+for N in $CLUSTER_SIZES; do
 
     echo
-    echo "------------------------------------------------------------------------------------------"
-    echo "A executar teste com N=$N VUs..."
-    echo "Duração: $DURATION"
-    echo "------------------------------------------------------------------------------------------"
+    echo "=========================================================================================="
+    echo "A criar cluster Consul com N=$N servidores..."
+    echo "=========================================================================================="
 
     # =========================================================================
-    # Executar k6
+    # Criar servidores Consul
     # =========================================================================
+
+    for ((i=1; i<=N; i++)); do
+
+        SERVER_NAME="${SERVER_PREFIX}-${i}"
+
+        echo "A iniciar $SERVER_NAME..."
+
+        if [[ "$i" -eq 1 ]]; then
+
+            # -----------------------------------------------------------------
+            # Primeiro servidor
+            #
+            # Este servidor serve como ponto inicial de descoberta.
+            # -----------------------------------------------------------------
+
+            docker run -d \
+              --name "$SERVER_NAME" \
+              --net "$NETWORK_NAME" \
+              --cpus="1.0" \
+              --memory="512m" \
+              -p 8500:8500 \
+              hashicorp/consul:latest \
+              agent \
+              -server \
+              -node="$SERVER_NAME" \
+              -bootstrap-expect="$N" \
+              -ui \
+              -client=0.0.0.0
+
+        else
+
+            # -----------------------------------------------------------------
+            # Servidores seguintes
+            #
+            # Estes servidores fazem retry-join ao primeiro servidor.
+            # O bootstrap-expect garante que o cluster espera pelos N servidores.
+            # -----------------------------------------------------------------
+
+            docker run -d \
+              --name "$SERVER_NAME" \
+              --net "$NETWORK_NAME" \
+              --cpus="1.0" \
+              --memory="512m" \
+              hashicorp/consul:latest \
+              agent \
+              -server \
+              -node="$SERVER_NAME" \
+              -bootstrap-expect="$N" \
+              -retry-join="${SERVER_PREFIX}-1" \
+              -ui \
+              -client=0.0.0.0
+
+        fi
+
+    done
+
+    # =========================================================================
+    # Aguardar os servidores entrarem no cluster
+    # =========================================================================
+
+    echo
+    echo "A aguardar os $N servidores entrarem no cluster..."
+
+    until true; do
+
+        MEMBERS=$(
+            curl -s http://localhost:8500/v1/agent/members 2>/dev/null |
+            grep -o '"Status":1' |
+            wc -l |
+            tr -d ' '
+        )
+
+        if [[ "$MEMBERS" -eq "$N" ]]; then
+            break
+        fi
+
+        echo "  Servidores disponíveis: $MEMBERS/$N"
+        sleep 1
+    done
+
+    echo "Todos os $N servidores estão presentes no cluster."
+
+    # =========================================================================
+    # Aguardar eleição do líder
+    # =========================================================================
+
+    echo "A aguardar eleição do líder Raft..."
+
+    until curl -s http://localhost:8500/v1/status/leader |
+          grep -q ':[0-9]'; do
+
+        sleep 1
+
+    done
+
+    LEADER=$(
+        curl -s http://localhost:8500/v1/status/leader
+    )
+
+    echo "Líder eleito: $LEADER"
+    echo
+
+    # =========================================================================
+    # Pequena pausa para estabilização
+    # =========================================================================
+
+    sleep 2
+
+    # =========================================================================
+    # Executar benchmark
+    #
+    # IMPORTANTE:
+    #
+    # Os VUs permanecem constantes entre os diferentes tamanhos de cluster.
+    # O único parâmetro experimental alterado é N = número de servidores.
+    #
+    # Os requests são enviados sempre para consul-server-1.
+    # Se este não for o líder, o agente encaminha a operação para o líder,
+    # mantendo o custo de comunicação/consenso associado ao cluster.
+    # =========================================================================
+
+    echo "------------------------------------------------------------------------------------------"
+    echo "A executar benchmark com N=$N servidores..."
+    echo "VUs: $CLIENT_VUS"
+    echo "Duração: $DURATION"
+    echo "------------------------------------------------------------------------------------------"
 
     OUTPUT=$(docker run --rm -i \
       --net "$NETWORK_NAME" \
       grafana/k6 run - \
-      --vus "$N" \
+      --vus "$CLIENT_VUS" \
       --duration "$DURATION" \
       --summary-time-unit=ms \
       --summary-trend-stats="avg,min,med,max,p(90),p(95)" \
       2>&1 << 'EOF'
+
 import http from 'k6/http';
 
 export default function () {
+
     const payload = JSON.stringify({
         status: "ok",
         vu: __VU,
@@ -129,7 +237,7 @@ export default function () {
     });
 
     http.put(
-        'http://consul-server:8500/v1/kv/benchmark/write',
+        'http://consul-server-1:8500/v1/kv/benchmark/write',
         payload,
         {
             headers: {
@@ -138,6 +246,7 @@ export default function () {
         }
     );
 }
+
 EOF
     )
 
@@ -171,41 +280,11 @@ EOF
         '
     )
 
-    # =========================================================================
-    # Encontrar linha de latência
-    # =========================================================================
-
-    DUR_LINE=$(
-        echo "$OUTPUT" |
-        awk '
-            /^[[:space:]]*http_req_duration[.]+:/ &&
-            $0 !~ /expected_response/ {
-                print
-                exit
-            }
-        '
-    )
-
-    # =========================================================================
-    # Extrair latências
-    # =========================================================================
-
-    AVG=$(extract_metric "avg" "$DUR_LINE")
-    MED=$(extract_metric "med" "$DUR_LINE")
-    P90=$(extract_metric "p(90)" "$DUR_LINE")
-    P95=$(extract_metric "p(95)" "$DUR_LINE")
-    MAX=$(extract_metric "max" "$DUR_LINE")
-
-    # Remover unidade, caso presente
+    # Remover espaços
     RPS=$(echo "$RPS" | sed 's/[[:space:]]//g')
-    AVG=$(echo "$AVG" | sed 's/ms$//')
-    MED=$(echo "$MED" | sed 's/ms$//')
-    P90=$(echo "$P90" | sed 's/ms$//')
-    P95=$(echo "$P95" | sed 's/ms$//')
-    MAX=$(echo "$MAX" | sed 's/ms$//')
 
     # =========================================================================
-    # Validar resultados
+    # Validar throughput
     # =========================================================================
 
     if [[ -z "$RPS" ]]; then
@@ -213,37 +292,22 @@ EOF
         exit 1
     fi
 
-    if [[ -z "$DUR_LINE" ]]; then
-        echo "ERRO: não foi possível encontrar http_req_duration para N=$N." >&2
-        exit 1
-    fi
-
-    if [[ -z "$AVG" || \
-          -z "$MED" || \
-          -z "$P90" || \
-          -z "$P95" || \
-          -z "$MAX" ]]; then
-
-        echo "ERRO: não foi possível extrair todas as métricas de latência para N=$N." >&2
-        echo
-        echo "Linha encontrada:" >&2
-        echo "$DUR_LINE" >&2
-        exit 1
-    fi
-
     # =========================================================================
-    # Guardar resultado
+    # Guardar resultado no CSV
     # =========================================================================
 
-    printf "%-6s %-16.2f %-14.2f %-14.2f %-14.2f %-14.2f %-14.2f\n" \
-      "$N" \
-      "$RPS" \
-      "$AVG" \
-      "$MED" \
-      "$P90" \
-      "$P95" \
-      "$MAX" \
-      | tee -a "$OUTPUT_FILE"
+    printf "%s,%.2f\n" "$N" "$RPS" >> "$OUTPUT_FILE"
+
+    # =========================================================================
+    # Remover cluster antes do próximo tamanho
+    # =========================================================================
+
+    echo
+    echo "A remover cluster N=$N..."
+
+    for ((i=1; i<=N; i++)); do
+        docker rm -f "${SERVER_PREFIX}-${i}" 2>/dev/null || true
+    done
 
 done
 
@@ -257,5 +321,8 @@ echo "Experimento concluído."
 echo "=========================================================================================="
 echo "Dados: $OUTPUT_FILE"
 echo
-echo "Níveis testados:"
-echo "$CONCURRENCY_LEVELS"
+echo "Tamanhos de cluster testados:"
+echo "$CLUSTER_SIZES"
+echo
+echo "Número de VUs mantido constante:"
+echo "$CLIENT_VUS"

@@ -255,13 +255,13 @@ set xlabel "N"
 set ylabel "Throughput / N (req/s per node)"
 
 plot \
-    "${READ_FILE}" using 1:($2/$1) \
+    "${READ_FILE}" using 1:(\$2/\$1) \
         with points pt 7 ps 1.2 \
         title "Measured READ", \
     read_per_node(x) \
         with lines lw 2 \
         title "READ USL", \
-    "${WRITE_FILE}" using 1:($2/$1) \
+    "${WRITE_FILE}" using 1:(\$2/\$1) \
         with points pt 5 ps 1.2 \
         title "Measured WRITE", \
     write_per_node(x) \

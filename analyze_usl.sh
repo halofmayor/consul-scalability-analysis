@@ -190,7 +190,7 @@ write_usl(x) = (${WRITE_LAMBDA} * x) / \
 # Janela dos gráficos
 # =============================================================================
 
-set xrange [0:${N_MAX} * 1.05]
+set xrange [1:${N_MAX} * 1.05]
 
 set key top left box opaque
 

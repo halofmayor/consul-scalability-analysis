@@ -2,20 +2,13 @@
 set -euo pipefail
 
 # =============================================================================
-# Parâmetros
-#
 # Uso:
 #   ./stress_writes.sh
 #   ./stress_writes.sh 30s
 #   ./stress_writes.sh 30s "1 3 5 7"
 #   ./stress_writes.sh 30s "1 3 5 7" 32
-#
-# Parâmetros:
-#   $1 = duração de cada teste
-#   $2 = tamanhos do cluster Consul
-#   $3 = número fixo de VUs do k6
-#
-# IMPORTANTE:
+
+#   NOTA:
 #   N representa agora o número de servidores Consul,
 #   e NÃO o número de clientes concorrentes.
 # =============================================================================
@@ -27,18 +20,6 @@ CLIENT_VUS="${3:-32}"
 NETWORK_NAME="consul-net"
 SERVER_PREFIX="consul-server"
 OUTPUT_FILE="write_stress_results.csv"
-
-echo "=========================================================================================="
-echo "Experimento: Write Scalability / Consenso Raft"
-echo "=========================================================================================="
-echo "Duração por teste: $DURATION"
-echo "Tamanhos do cluster: $CLUSTER_SIZES"
-echo "VUs do k6: $CLIENT_VUS"
-echo
-
-# =============================================================================
-# Função de limpeza
-# =============================================================================
 
 cleanup() {
 
@@ -60,25 +41,14 @@ cleanup() {
 # Garantir limpeza caso o script seja interrompido
 trap cleanup EXIT
 
-# =============================================================================
-# Limpeza prévia
-# =============================================================================
-
+#limpeza
+#deixo isto aqui porque o stress_reads as vezes deixa containers a rodar quando não devia.
 docker ps -a --format '{{.Names}}' |
     grep "^${SERVER_PREFIX}" |
     xargs -r docker rm -f 2>/dev/null || true
 
 docker network rm "$NETWORK_NAME" 2>/dev/null || true
-
-# =============================================================================
-# Criar rede
-# =============================================================================
-
 docker network create "$NETWORK_NAME"
-
-# =============================================================================
-# Executar cada tamanho de cluster
-# =============================================================================
 
 for N in $CLUSTER_SIZES; do
 
@@ -86,10 +56,6 @@ for N in $CLUSTER_SIZES; do
     echo "=========================================================================================="
     echo "A criar cluster Consul com N=$N servidores..."
     echo "=========================================================================================="
-
-    # =========================================================================
-    # Criar servidores Consul
-    # =========================================================================
 
     for ((i=1; i<=N; i++)); do
 
@@ -99,12 +65,7 @@ for N in $CLUSTER_SIZES; do
 
         if [[ "$i" -eq 1 ]]; then
 
-            # -----------------------------------------------------------------
-            # Primeiro servidor
-            #
-            # Este servidor serve como ponto inicial de descoberta.
-            # -----------------------------------------------------------------
-
+            #Primeiro servidor, serve como ponto inicial de descoberta.
             docker run -d \
               --name "$SERVER_NAME" \
               --net "$NETWORK_NAME" \
@@ -120,13 +81,8 @@ for N in $CLUSTER_SIZES; do
               -client=0.0.0.0
 
         else
-
-            # -----------------------------------------------------------------
-            # Servidores seguintes
-            #
-            # Estes servidores fazem retry-join ao primeiro servidor.
-            # O bootstrap-expect garante que o cluster espera pelos N servidores.
-            # -----------------------------------------------------------------
+            #Estes servidores fazem retry-join ao primeiro servidor.
+            #bootstrap-expect garante que o cluster espera pelos N servidores.
 
             docker run -d \
               --name "$SERVER_NAME" \
@@ -145,10 +101,6 @@ for N in $CLUSTER_SIZES; do
         fi
 
     done
-
-    # =========================================================================
-    # Aguardar os servidores entrarem no cluster
-    # =========================================================================
 
     echo
     echo "A aguardar os $N servidores entrarem no cluster..."
@@ -171,11 +123,6 @@ for N in $CLUSTER_SIZES; do
     done
 
     echo "Todos os $N servidores estão presentes no cluster."
-
-    # =========================================================================
-    # Aguardar eleição do líder
-    # =========================================================================
-
     echo "A aguardar eleição do líder Raft..."
 
     until curl -s http://localhost:8500/v1/status/leader |
@@ -192,27 +139,11 @@ for N in $CLUSTER_SIZES; do
     echo "Líder eleito: $LEADER"
     echo
 
-    # =========================================================================
-    # Pequena pausa para estabilização
-    # =========================================================================
-
+    #pausa para estabilização, as vezes o throughput tem um spike indesejado caso contrário.
     sleep 2
 
-    # =========================================================================
-    # Executar benchmark
-    #
-    # IMPORTANTE:
-    #
-    # Os VUs permanecem constantes entre os diferentes tamanhos de cluster.
-    # O único parâmetro experimental alterado é N = número de servidores.
-    #
-    # Os requests são enviados sempre para consul-server-1.
-    # Se este não for o líder, o agente encaminha a operação para o líder,
-    # mantendo o custo de comunicação/consenso associado ao cluster.
-    # =========================================================================
-
     echo "------------------------------------------------------------------------------------------"
-    echo "A executar benchmark com N=$N servidores..."
+    echo "benchmark com N=$N servidores..."
     echo "VUs: $CLIENT_VUS"
     echo "Duração: $DURATION"
     echo "------------------------------------------------------------------------------------------"
@@ -250,17 +181,10 @@ export default function () {
 EOF
     )
 
-    # =========================================================================
-    # Mostrar output do k6
-    # =========================================================================
-
     echo "$OUTPUT"
     echo
 
-    # =========================================================================
-    # Extrair throughput
-    # =========================================================================
-
+    #extrair throughput, idêntico ao stress_reads.sh
     RPS=$(
         echo "$OUTPUT" |
         awk '
@@ -283,25 +207,15 @@ EOF
     # Remover espaços
     RPS=$(echo "$RPS" | sed 's/[[:space:]]//g')
 
-    # =========================================================================
-    # Validar throughput
-    # =========================================================================
-
+    #throughput check
     if [[ -z "$RPS" ]]; then
         echo "ERRO: não foi possível extrair o throughput para N=$N." >&2
         exit 1
     fi
 
-    # =========================================================================
-    # Guardar resultado no CSV
-    # =========================================================================
-
     printf "%s,%.2f\n" "$N" "$RPS" >> "$OUTPUT_FILE"
 
-    # =========================================================================
-    # Remover cluster antes do próximo tamanho
-    # =========================================================================
-
+    # cleanup antes do próximo teste
     echo
     echo "A remover cluster N=$N..."
 
@@ -310,10 +224,6 @@ EOF
     done
 
 done
-
-# =============================================================================
-# Final
-# =============================================================================
 
 echo
 echo "=========================================================================================="

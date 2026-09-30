@@ -81,6 +81,7 @@ if ! [[ "$REPS" =~ ^[0-9]+$ ]] || [[ "$REPS" -lt 1 ]]; then
     exit 1
 fi
 
+#função auxiliar, facilita verificar o estado do sistema durante o desenvolvimento
 log() {
     echo
     echo "================================================================================"
@@ -93,16 +94,6 @@ fail() {
     echo "ERRO: $1" >&2
     exit 1
 }
-
-# =============================================================================
-# Checks dos ficheiros necessários
-# =============================================================================
-
-[[ -f "$READ_SCRIPT" ]]      || fail "Não encontrado: $READ_SCRIPT"
-[[ -f "$WRITE_SCRIPT" ]]     || fail "Não encontrado: $WRITE_SCRIPT"
-[[ -f "$AGGREGATE_SCRIPT" ]] || fail "Não encontrado: $AGGREGATE_SCRIPT"
-[[ -f "$ANALYSIS_SCRIPT" ]]  || fail "Não encontrado: $ANALYSIS_SCRIPT"
-[[ -f "$USL_JAR" ]]          || fail "Não encontrado: $USL_JAR"
 
 if ! command -v python3 >/dev/null 2>&1; then
     fail "python3 não encontrado."
@@ -124,11 +115,8 @@ echo "USL JAR           : $USL_JAR"
 
 cd "$SCRIPT_DIR"
 
-# =============================================================================
-# Preparar pasta de dados brutos
-#
-# Evita misturar dados desta execução com repetições de execuções anteriores.
-# =============================================================================
+#preparar pasta de dados
+#evita misturar dados desta execução com execuções anteriores.
 
 log "A preparar $RAW_DIR/"
 
@@ -140,32 +128,19 @@ rm -f \
 
 echo "Feito."
 
-# =============================================================================
-# Correr REPS repetições
-# =============================================================================
+echo "AVISO: as vezes a docker engine se recusa a funcionar, se um hash não aparecer, reinicie a docker engine"
 
 for i in $(seq 1 "$REPS"); do
-
-    # =========================================================================
-    # READ
-    # =========================================================================
 
     log "REPETIÇÃO $i / $REPS — READ"
 
     "$READ_SCRIPT" "$DURATION" "$CONCURRENCY_LEVELS"
-
-    [[ -f "$READ_AGGREGATED" ]] ||
-        fail "READ da repetição $i não produziu read_stress_results.csv."
 
     mv \
         "$READ_AGGREGATED" \
         "$RAW_DIR/read_rep${i}.csv"
 
     echo "Guardado: $RAW_DIR/read_rep${i}.csv"
-
-    # =========================================================================
-    # WRITE
-    # =========================================================================
 
     log "REPETIÇÃO $i / $REPS — WRITE"
 
@@ -182,12 +157,6 @@ for i in $(seq 1 "$REPS"); do
 
 done
 
-# =============================================================================
-# Agregar repetições
-#
-# A mediana é calculada por N para READ e WRITE.
-# =============================================================================
-
 log "A AGREGAR REPETIÇÕES (mediana por N)"
 
 python3 "$AGGREGATE_SCRIPT"
@@ -201,24 +170,16 @@ python3 "$AGGREGATE_SCRIPT"
 echo "READ agregado : $READ_AGGREGATED"
 echo "WRITE agregado: $WRITE_AGGREGATED"
 
-# =============================================================================
 # Calcular parâmetros USL
-#
-# O JAR produz exatamente:
-#
+
+# assume o exato formato de output:
 #   Total useful lines read: 6
 #   Lambda: 3741.8009056961 Delta: 0.2452552887 Kappa: 0.0074262208
-#
-# Assumimos que o JAR recebe o ficheiro CSV como único argumento:
-#
+# também assume o exato formato de input:
 #   java -jar esle-usl-1.0-SNAPSHOT.jar <csv>
 # =============================================================================
 
 log "CÁLCULO DOS PARÂMETROS USL"
-
-# -----------------------------------------------------------------------------
-# READ
-# -----------------------------------------------------------------------------
 
 echo "A calcular parâmetros USL para READ..."
 echo "Ficheiro: $READ_AGGREGATED"
@@ -277,10 +238,6 @@ echo "READ:"
 echo "  Lambda = $READ_LAMBDA"
 echo "  Delta  = $READ_DELTA"
 echo "  Kappa  = $READ_KAPPA"
-
-# -----------------------------------------------------------------------------
-# WRITE
-# -----------------------------------------------------------------------------
 
 echo
 echo "A calcular parâmetros USL para WRITE..."
@@ -341,21 +298,6 @@ echo "  Lambda = $WRITE_LAMBDA"
 echo "  Delta  = $WRITE_DELTA"
 echo "  Kappa  = $WRITE_KAPPA"
 
-# =============================================================================
-# Gerar gráficos
-#
-# analyze_usl.sh recebe:
-#
-#   READ CSV
-#   WRITE CSV
-#   READ lambda
-#   READ delta
-#   READ kappa
-#   WRITE lambda
-#   WRITE delta
-#   WRITE kappa
-# =============================================================================
-
 log "GERAÇÃO DOS GRÁFICOS USL"
 
 "$ANALYSIS_SCRIPT" \
@@ -367,10 +309,6 @@ log "GERAÇÃO DOS GRÁFICOS USL"
     "$WRITE_LAMBDA" \
     "$WRITE_DELTA" \
     "$WRITE_KAPPA"
-
-# =============================================================================
-# Final
-# =============================================================================
 
 log "CONCLUÍDO"
 

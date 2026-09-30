@@ -7,28 +7,16 @@ set -euo pipefail
 #       1200.5 0.01 0.0001 \
 #       950.2 0.05 0.0008
 
-#   formato csv:
-
-#   1,1234.56
-#   2,2345.67
-#   ...
-
 export LC_ALL=C.UTF-8
 
-# =============================================================================
-# Validar argumentos
-# =============================================================================
+# Valida argumentos, necessário porque às vezes eu reuso tabelas
+# e corro risco de apagar gráficos -Lucas
 
 if [[ $# -ne 8 ]]; then
     echo "Uso:"
     echo "  $0 <read_csv> <write_csv> \\"
     echo "     <read_lambda> <read_delta> <read_kappa> \\"
     echo "     <write_lambda> <write_delta> <write_kappa>"
-    echo
-    echo "Exemplo:"
-    echo "  $0 read_stress_results.csv write_stress_results.csv \\"
-    echo "     1200.5 0.01 0.0001 \\"
-    echo "     950.2 0.05 0.0008"
     exit 1
 fi
 
@@ -43,19 +31,12 @@ WRITE_LAMBDA="$6"
 WRITE_DELTA="$7"
 WRITE_KAPPA="$8"
 
-# =============================================================================
-# Ficheiros de output
-# =============================================================================
-
 READ_PLOT="usl_read.png"
 WRITE_PLOT="usl_write.png"
 THROUGHPUT_PLOT="usl_throughput.png"
 TRANSFORMED_PLOT="usl_transformed.png"
 
-# =============================================================================
-# Verificar dependências
-# =============================================================================
-
+#verificar dependências
 if ! command -v gnuplot >/dev/null 2>&1; then
     echo "ERRO: gnuplot não encontrado." >&2
     exit 1
@@ -71,10 +52,7 @@ if [[ ! -f "$WRITE_FILE" ]]; then
     exit 1
 fi
 
-# =============================================================================
-# Validar parâmetros numéricos
-# =============================================================================
-
+#validação numérica, failsafe caso algo tenha corrido mal no benchmark
 is_number() {
     [[ "$1" =~ ^[-+]?[0-9]*\.?[0-9]+([eE][-+]?[0-9]+)?$ ]]
 }
@@ -91,12 +69,8 @@ do
     fi
 done
 
-# =============================================================================
-# Mostrar configuração
-# =============================================================================
-
 echo "================================================================================"
-echo "Geração de gráficos - Universal Scalability Law"
+echo "Geração de gráficos USL"
 echo "================================================================================"
 echo
 
@@ -112,9 +86,7 @@ echo "  delta  = $WRITE_DELTA"
 echo "  kappa  = $WRITE_KAPPA"
 echo
 
-# =============================================================================
-# Determinar maior N
-# =============================================================================
+#determinar maior N
 
 MAX_READ_N=$(
     awk -F',' '
@@ -156,9 +128,7 @@ if [[ -z "$N_MAX" || "$N_MAX" == "0" ]]; then
     exit 1
 fi
 
-# =============================================================================
-# Criar script temporário do gnuplot
-# =============================================================================
+# SCRIPT GNUPLOT:
 
 GNUPLOT_SCRIPT="$(mktemp)"
 trap 'rm -f "$GNUPLOT_SCRIPT"' EXIT
@@ -172,10 +142,6 @@ set border linewidth 1.2
 
 set datafile separator ","
 
-# =============================================================================
-# Funções USL
-# =============================================================================
-
 read_usl(x) = (${READ_LAMBDA} * x) / \
               (1.0 \
                + ${READ_DELTA} * (x - 1.0) \
@@ -186,17 +152,11 @@ write_usl(x) = (${WRITE_LAMBDA} * x) / \
                 + ${WRITE_DELTA} * (x - 1.0) \
                 + ${WRITE_KAPPA} * x * (x - 1.0))
 
-# =============================================================================
-# Janela dos gráficos
-# =============================================================================
+# CONFIGS DE JANELA
 
 set xrange [1:${N_MAX} * 1.05]
 
 set key top left box opaque
-
-# =============================================================================
-# 1. READ
-# =============================================================================
 
 set output "${READ_PLOT}"
 
@@ -215,9 +175,6 @@ plot \
                       ${READ_DELTA}, \
                       ${READ_KAPPA})
 
-# =============================================================================
-# 2. WRITE
-# =============================================================================
 
 set output "${WRITE_PLOT}"
 
@@ -236,9 +193,6 @@ plot \
                       ${WRITE_DELTA}, \
                       ${WRITE_KAPPA})
 
-# =============================================================================
-# 3. READ vs WRITE
-# =============================================================================
 
 set output "${THROUGHPUT_PLOT}"
 
@@ -261,58 +215,62 @@ plot \
         title "WRITE USL"
 
 # =============================================================================
-# 4. Transformação N / X(N)
+# 4. Throughput por nó
 #
-# Os pontos representam os valores medidos.
-
-# A curva teórica corresponde à transformação do modelo USL:
+# Mostra:
 #
-#   N / X(N)
-#       = [1 + delta*(N-1) + kappa*N*(N-1)] / lambda
+#   X(N) / N
+#
+# onde:
+#
+#   X(N) = throughput total
+#   N    = número de VUs / servidores
+#
+# A curva teórica corresponde ao modelo USL:
+#
+#   X(N) / N =
+#
+#       lambda
+#       -----------------------------------------------
+#       1 + delta*(N-1) + kappa*N*(N-1)
 #
 # =============================================================================
 
-read_transformed(x) = \
+read_per_node(x) = \
+    (${READ_LAMBDA}) / \
     (1.0 \
      + ${READ_DELTA} * (x - 1.0) \
-     + ${READ_KAPPA} * x * (x - 1.0)) / ${READ_LAMBDA}
+     + ${READ_KAPPA} * x * (x - 1.0))
 
-write_transformed(x) = \
+write_per_node(x) = \
+    (${WRITE_LAMBDA}) / \
     (1.0 \
      + ${WRITE_DELTA} * (x - 1.0) \
-     + ${WRITE_KAPPA} * x * (x - 1.0)) / ${WRITE_LAMBDA}
+     + ${WRITE_KAPPA} * x * (x - 1.0))
 
 set output "${TRANSFORMED_PLOT}"
 
-set title "USL transformed data: N / X(N)"
+set title "Consul throughput per node"
 set xlabel "N"
-set ylabel "N / Throughput (s)"
+set ylabel "Throughput / N (req/s per node)"
 
 plot \
-    "${READ_FILE}" using 1:(\$1/\$2) \
+    "${READ_FILE}" using 1:($2/$1) \
         with points pt 7 ps 1.2 \
         title "Measured READ", \
-    read_transformed(x) \
+    read_per_node(x) \
         with lines lw 2 \
         title "READ USL", \
-    "${WRITE_FILE}" using 1:(\$1/\$2) \
+    "${WRITE_FILE}" using 1:($2/$1) \
         with points pt 5 ps 1.2 \
         title "Measured WRITE", \
-    write_transformed(x) \
+    write_per_node(x) \
         with lines lw 2 \
         title "WRITE USL"
 
 EOF
 
-# =============================================================================
-# Executar gnuplot
-# =============================================================================
-
 gnuplot "$GNUPLOT_SCRIPT"
-
-# =============================================================================
-# Final
-# =============================================================================
 
 echo
 echo "================================================================================"
